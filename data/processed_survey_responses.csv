@@ -1,0 +1,64 @@
+Staff_ID,Improved_patient_care,Easy_to_learn,Easy_to_implement,Easier_for_nurses,Easier_for_cardiologists,Timely_notification_step_1,Timely_notification_step_2,Timely_notification_step_3,Comments,processed_comments
+Staff_1,5,3,2,4,4,3,5,4,Notifications could be clearer.,notification could clearer
+Staff_2,3,2,3,4,3,3,3,4,"Overall, it's a positive change.",overall positive change
+Staff_3,5,1,3,4,4,4,5,3,Notifications could be clearer.,notification could clearer
+Staff_4,4,4,4,3,4,4,3,4,"Overall, it's a positive change.",overall positive change
+Staff_5,3,3,3,3,5,5,3,4,"Overall, it's a positive change.",overall positive change
+Staff_6,5,1,3,5,4,3,4,3,Notifications could be clearer.,notification could clearer
+Staff_7,3,4,3,5,3,4,5,3,Notifications could be clearer.,notification could clearer
+Staff_8,3,3,2,4,3,5,5,3,,nan
+Staff_9,5,1,1,5,5,4,5,5,Learning the workflow was time-consuming initially but manageable.,learning workflow timeconsuming initially manageable
+Staff_10,5,2,4,3,3,4,4,4,Notifications could be clearer.,notification could clearer
+Staff_11,3,3,1,3,4,5,5,5,Workflow is efficient and straightforward.,workflow efficient straightforward
+Staff_12,5,1,2,4,3,3,5,5,Notifications could be clearer.,notification could clearer
+Staff_13,5,2,3,5,4,3,4,4,Workflow is efficient and straightforward.,workflow efficient straightforward
+Staff_14,5,1,2,5,3,4,5,3,Learning the workflow was time-consuming initially but manageable.,learning workflow timeconsuming initially manageable
+Staff_15,3,3,1,5,5,3,3,5,"Overall, it's a positive change.",overall positive change
+Staff_16,4,4,3,4,3,4,3,5,Timeliness has improved significantly.,timeliness improved significantly
+Staff_17,4,2,2,4,5,5,3,3,"Overall, it's a positive change.",overall positive change
+Staff_18,5,3,3,3,5,3,3,5,Workflow is efficient and straightforward.,workflow efficient straightforward
+Staff_19,5,1,2,4,4,4,5,5,,nan
+Staff_20,5,3,2,4,5,4,4,4,Workflow is efficient and straightforward.,workflow efficient straightforward
+Staff_21,4,2,2,5,3,5,4,5,Timeliness has improved significantly.,timeliness improved significantly
+Staff_22,3,3,1,5,4,4,5,4,,nan
+Staff_23,3,2,4,5,4,4,3,3,Timeliness has improved significantly.,timeliness improved significantly
+Staff_24,4,1,4,5,5,5,3,5,Workflow is efficient and straightforward.,workflow efficient straightforward
+Staff_25,4,4,3,5,3,4,3,4,Learning the workflow was time-consuming initially but manageable.,learning workflow timeconsuming initially manageable
+Staff_26,3,2,3,3,5,5,4,4,Workflow is efficient and straightforward.,workflow efficient straightforward
+Staff_27,3,4,4,5,4,5,5,4,"Overall, it's a positive change.",overall positive change
+Staff_28,5,2,1,4,5,5,5,3,Timeliness has improved significantly.,timeliness improved significantly
+Staff_29,4,1,4,5,4,5,5,4,Workflow is efficient and straightforward.,workflow efficient straightforward
+Staff_30,5,1,3,3,5,3,4,3,,nan
+Staff_31,4,3,3,4,3,3,5,3,,nan
+Staff_32,5,2,2,4,3,4,4,4,"Overall, it's a positive change.",overall positive change
+Staff_33,5,2,4,4,3,4,4,3,Timeliness has improved significantly.,timeliness improved significantly
+Staff_34,4,3,1,5,5,4,3,3,Timeliness has improved significantly.,timeliness improved significantly
+Staff_35,4,1,3,3,3,4,5,5,"Overall, it's a positive change.",overall positive change
+Staff_36,5,2,3,5,5,4,5,3,Workflow is efficient and straightforward.,workflow efficient straightforward
+Staff_37,3,4,3,5,5,5,3,3,Workflow is efficient and straightforward.,workflow efficient straightforward
+Staff_38,4,4,3,4,4,5,4,3,Timeliness has improved significantly.,timeliness improved significantly
+Staff_39,3,4,1,4,5,4,5,4,"Overall, it's a positive change.",overall positive change
+Staff_40,5,3,4,5,4,4,3,5,Learning the workflow was time-consuming initially but manageable.,learning workflow timeconsuming initially manageable
+Staff_41,4,3,1,3,5,3,3,5,"Overall, it's a positive change.",overall positive change
+Staff_42,3,4,2,5,3,5,3,5,Learning the workflow was time-consuming initially but manageable.,learning workflow timeconsuming initially manageable
+Staff_43,4,4,4,5,3,3,3,3,,nan
+Staff_44,3,3,4,5,5,4,4,5,"Overall, it's a positive change.",overall positive change
+Staff_45,5,3,2,4,4,3,3,4,Workflow is efficient and straightforward.,workflow efficient straightforward
+Staff_46,5,2,1,4,3,3,5,5,Timeliness has improved significantly.,timeliness improved significantly
+Staff_47,3,4,4,4,5,5,4,5,Learning the workflow was time-consuming initially but manageable.,learning workflow timeconsuming initially manageable
+Staff_48,4,2,1,3,4,5,4,5,,nan
+Staff_49,3,2,1,5,3,5,4,4,Timeliness has improved significantly.,timeliness improved significantly
+Staff_50,5,1,1,5,5,4,5,4,,nan
+Staff_51,4,3,2,5,4,4,3,4,Workflow is efficient and straightforward.,workflow efficient straightforward
+Staff_52,5,2,2,5,4,3,3,5,Notifications could be clearer.,notification could clearer
+Staff_53,3,4,3,5,3,3,3,4,,nan
+Staff_54,3,3,4,3,5,4,3,3,Notifications could be clearer.,notification could clearer
+Staff_55,4,3,3,5,5,4,3,3,,nan
+Staff_56,3,2,4,3,5,3,3,4,Notifications could be clearer.,notification could clearer
+Staff_57,3,4,3,5,4,4,4,4,Timeliness has improved significantly.,timeliness improved significantly
+Staff_58,5,2,1,3,4,3,4,4,"Overall, it's a positive change.",overall positive change
+Staff_59,5,3,4,4,4,3,3,4,Timeliness has improved significantly.,timeliness improved significantly
+Staff_60,5,4,2,5,4,3,3,3,Notifications could be clearer.,notification could clearer
+Staff_61,3,1,3,4,3,4,4,3,Notifications could be clearer.,notification could clearer
+Staff_62,5,3,2,4,4,5,3,3,Learning the workflow was time-consuming initially but manageable.,learning workflow timeconsuming initially manageable
+Staff_63,5,3,2,5,3,4,5,5,,nan
