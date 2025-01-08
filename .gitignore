@@ -1,0 +1,8 @@
+.DS_Store
+*.pyc
+__pycache__/
+.Rhistory
+.Rproj.user/
+*.Rproj
+nltk_data/
+wordcloud_data.csv

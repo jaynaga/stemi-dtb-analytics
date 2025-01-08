@@ -1,0 +1,766 @@
+---
+title: "Streamlining STEMI Care: Quality of Care Report for ST-Elevation Myocardial Infarction (STEMI) Patients in SyntheticMGUH"
+description: "Quality improvement analysis of door-to-balloon time in a synthetic hospital EHR"
+author:
+  - name: "Jay Nagabhairu"
+  - name: "Stephanie Araki"
+  - name: "Maxwell Lewis"
+  - name: "Pari Shah"
+date: last-modified
+date-format: short
+title-block-banner: '#041E42'
+format:
+  html:
+    self-contained: true
+---
+
+```{r setup, include=FALSE}
+#| warning: false
+library(tidyverse)     # loads the tidyverse tools
+library(RPostgres)     # loads the database driver for PostgreSQL
+library(connections)   # helps RPostgres work with RStudio
+library(keyring)       # access to a local encrypted keychain for passwords
+
+
+con <- connection_open(RPostgres::Postgres(),
+          dbname = "syntheticmguh",
+          host = "34.145.215.95",
+          user = "hids502_student",
+          password = key_get(service = "syntheticmguh", 
+                             username = "hids502_student"),
+          # Tell the driver to return very large integers as floating point (vs truncating them)
+          bigint = "numeric")
+
+```
+
+# I. Introduction
+
+ST-Elevation Myocardial Infarction (STEMI) is a severe type of heart attack caused by complete blockage of a coronary artery. It is a medical emergency requiring timely diagnosis and treatment to restore blood flow and reduce myocardial damage. Evidence-based guidelines emphasize rapid identification and management of STEMI patients to optimize outcomes and reduce mortality.
+
+Quality Improvement (QI) initiatives play a crucial role in evaluating and enhancing adherence to these guidelines. This report evaluates key metrics related to STEMI care utilizing patient data from the [Synthea dataset](https://github.com/synthetichealth/synthea/wiki/CSV-File-Data-Dictionary) to assess compliance with clinical standards, identify areas for improvement, and propose strategies to enhance care quality.
+
+Key metrics for compliance, derived from the [American Heart Association (AHA)/American College of Cardiology (ACC) STEMI guidelines](https://www.ahajournals.org/doi/10.1161/cir.0b013e3182742cf6), include:
+
+* **Door-to-Balloon (DTB) time**: The proportion of patients receiving primary percutaneous coronary intervention (PCI) within the recommended 90-minute period.
+* **Medication Compliance**: The proportion of patients prescribed dual antiplatelet therapy (DAPT), high-intensity statins, and beta-blockers within 24 hours of a STEMI encounter.
+* **3-month Mortality Rate**: The proportion of patients with reported death within 3 months of a STEMI encounter.
+
+# II. Establishing a Myocardial Infarction (MI) Cohort
+
+To ensure our analysis encompasses a comprehensive range of patients with STEMI, we first created a general cohort of patients who presented with myocardial infarction (MI) based on the following criteria:
+
+* An **encounter** for myocardial infarction, from the `encounters` table.
+* A **problem/condition** of myocardial infarction, from the `conditions` table.
+* A **procedure** for myocardial infarction, from the `procedures` table.
+
+| SNOMED-CT Code | Description |
+| ---------------|-------------|
+| 22298006  | Myocardial infarction |
+| 401303003	| Acute ST segment elevation myocardial infarction (disorder) |
+| 401314000	| Acute non-ST segment elevation myocardial infarction (disorder)	|
+
+* Note: We purposefully excluded patients with a History of myocardial infarction (399211009) in attempts to capture only patients who received a STEMI diagnosis from our hospital.
+
+
+The following demographic data points from the `patients` table will also be included:
+
+| Demographic | Description |
+| ---------------|-------------|
+| `patient` | Patient's unique identifier. |
+| `birthdate` | Patient's date of birth. |
+| `deathdate`	| Patient's date of death. If the patient has no date of death (either alive or unknown), NULL. |
+| `gender` | Patient's gender. M is male and F is female. |
+| `race` | Patient's race. |
+| `ethnicity` | Patient's ethnicity. |
+| `zip` | Patient's zip code. |
+
+```{sql connection=con}
+-- Drop the temporary table if it already exists
+DROP TABLE IF EXISTS mi_cohort;
+```
+
+```{sql connection=con}
+CREATE TEMPORARY TABLE mi_cohort AS
+WITH all_mi_patients AS (
+    -- MI encounter
+    SELECT 
+        patient,
+        reasoncode AS diagnosis_code,
+        reasondescription AS diagnosis_desc,
+        start
+    FROM encounters
+    WHERE reasoncode IN ('22298006', '401303003', '401314000') -- Myocardial infarction codes
+
+    UNION
+
+    -- MI condition
+    SELECT 
+        patient,
+        code AS diagnosis_code,
+        description AS diagnosis_desc,
+        start
+    FROM conditions
+    WHERE code IN ('22298006', '401303003', '401314000') -- Myocardial infarction codes
+
+    UNION
+
+    -- MI procedure
+    SELECT 
+        patient,
+        reasoncode AS diagnosis_code,
+        reasondescription AS diagnosis_desc,
+        start
+    FROM procedures
+    WHERE reasoncode IN ('22298006', '401303003', '401314000') -- Myocardial infarction codes
+),
+-- if a patient has multiple diagnoses, use only the most recent diagnosis
+recent_diagnosis AS (
+    SELECT 
+        patient,
+        diagnosis_code,
+        diagnosis_desc,
+        MAX(start) AS most_recent_date
+    FROM all_mi_patients
+    GROUP BY patient, diagnosis_code, diagnosis_desc
+),
+most_recent_per_patient AS (
+    SELECT DISTINCT ON (patient) 
+        patient, 
+        diagnosis_code, 
+        diagnosis_desc,
+        most_recent_date
+    FROM recent_diagnosis
+    ORDER BY patient, most_recent_date DESC
+)
+SELECT 
+    m.patient,
+    m.diagnosis_code,
+    m.diagnosis_desc,
+    m.most_recent_date,
+    p.birthdate, 
+    p.deathdate, 
+    p.race, 
+    p.ethnicity, 
+    p.gender,
+    p.city,
+    p.state,
+    p.zip
+FROM most_recent_per_patient m
+JOIN patients p 
+    ON p.id = m.patient;
+```
+
+```{sql connection=con}
+ -- Report the total number of patients in the MI cohort
+SELECT COUNT(DISTINCT patient) AS total_mi_patients
+FROM mi_cohort
+;
+```
+# III. Establishing the ST-Elevation Myocardial Infarction (STEMI) Cohort
+From the broader MI cohort, we then assembled a cohort of STEMI patients based on the following criteria:
+
+* An ECG/EKG procedure
+* A cardiology consultation 
+* A PCI procedure
+
+```{sql connection=con}
+-- Drop the temporary table if it already exists
+DROP TABLE IF EXISTS stemi_cohort;
+```
+
+```{sql connection=con}
+CREATE TEMPORARY TABLE stemi_cohort AS
+
+WITH ekg_patients AS (
+  SELECT 
+    patient
+  FROM procedures
+  -- EKG-related procedure codes:
+  WHERE code = '29303009'  -- Electrocardiographic procedure (procedure)
+     OR code = '268400002'  -- 12 lead electrocardiogram (procedure)
+)
+
+, cardio_consult_patients AS (
+  SELECT
+    patient
+  FROM procedures
+    WHERE code = '698314001' -- Consultation for treatment (procedure)
+)
+
+, pci_patients AS (
+  SELECT 
+    patient
+  FROM procedures
+  WHERE code = '415070008'  -- Percutaneous coronary intervention (procedure)
+)
+
+SELECT 
+  DISTINCT pci.patient,
+  p.birthdate, 
+  p.deathdate, 
+  p.race, 
+  p.ethnicity, 
+  p.gender,
+  p.city,
+  p.state,
+  p.zip
+FROM pci_patients pci
+JOIN patients p ON pci.patient = p.id
+JOIN ekg_patients ekg ON pci.patient = ekg.patient
+JOIN cardio_consult_patients cons ON pci.patient = cons.patient
+WHERE pci.patient IN (SELECT patient FROM mi_cohort);
+```
+
+```{sql connection=con}
+-- Check that all stemi_cohort patients are also in mi_cohort
+SELECT COUNT(*)
+FROM stemi_cohort s
+WHERE s.patient NOT IN (SELECT patient FROM mi_cohort);
+-- should return 0 
+```
+
+```{sql connection=con}
+-- Check that each row in the stemi_cohort table corresponds to a unique patient; these values should be equivalent
+SELECT COUNT(patient) AS all_patients,
+COUNT(DISTINCT patient) AS distinct_patients
+FROM stemi_cohort
+;
+```
+Approximately 26% of the MI cohort was included in the STEMI cohort.
+
+```{sql connection=con}
+-- Calculate the percentage of MI patients who are in the STEMI cohort
+SELECT
+  (SELECT COUNT(DISTINCT patient) FROM mi_cohort) AS mi_cohort_count,
+  (SELECT COUNT(DISTINCT patient) FROM stemi_cohort) AS stemi_cohort_count,
+  ROUND((COUNT(DISTINCT stemi_cohort.patient) * 100.0 / (SELECT COUNT(DISTINCT mi_cohort.patient) FROM mi_cohort)), 2) AS percent_STEMI_from_MI
+FROM stemi_cohort
+;
+```
+
+## A. STEMI Cohort - Demographics
+The demographic characteristics of the STEMI cohort provide insight into the population being analyzed. Key findings include:
+
+### 1. Age
+Here, we generate general statistics for the age of the STEMI cohort and also categorize patients into age ranges, where each range is inclusive (e.g. 'BETWEEN 36 AND 55' includes 36 and 55). 
+The age distribution shows a majority of the patients are between the ages of 66 and 89.
+
+#### Age Statistics:
+```{sql connection=con}
+-- Calculate the average, minimum and maximum age of patients in the STEMI cohort
+SELECT
+  AVG(date_part('year', age('2023-12-31', birthdate))) AS avg_age,
+  MIN(date_part('year', age('2023-12-31', birthdate))) AS min_age,
+  MAX(date_part('year', age('2023-12-31', birthdate))) AS max_age
+FROM stemi_cohort
+;
+```
+
+#### Age Distribution by Bins:
+```{sql connection=con}
+-- Calculate the proportion (as a percentage) of patients in each age category
+SELECT
+    CASE 
+      WHEN date_part('year', age('2023-12-31', birthdate)) < 18 THEN '< 18'
+      WHEN date_part('year', age('2023-12-31', birthdate)) BETWEEN 18 AND 35 THEN '18-35'
+      WHEN date_part('year', age('2023-12-31', birthdate)) BETWEEN 36 AND 55 THEN '35-55'
+      WHEN date_part('year', age('2023-12-31', birthdate)) BETWEEN 56 AND 65 THEN '56-65'
+      WHEN date_part('year', age('2023-12-31', birthdate)) BETWEEN 66 AND 89 THEN '66-89'
+      WHEN date_part('year', age('2023-12-31', birthdate)) > 89 THEN '> 89'
+      ELSE 'Unknown Age Group'
+    END AS age_group,
+    COUNT(*) as patient_count,
+    ROUND((COUNT(*) * 100.0 / SUM(COUNT(*)) OVER ()), 2) AS proportion_percent
+FROM stemi_cohort
+GROUP BY age_group
+ORDER BY age_group ASC
+;
+```
+
+### 2. Gender
+The gender distribution shows a predominance of males over females. 
+
+```{sql connection=con}
+SELECT gender, 
+  COUNT(*) AS num_patients,
+  ROUND((COUNT(*) * 100.0 / SUM(COUNT(*)) OVER ()), 2) AS proportion_percent
+FROM stemi_cohort
+GROUP BY gender
+;
+```
+
+### 3. Race and Ethnicity
+The majority of the patients in the STEMI cohort identify as either black or white, and non-hispanic. 
+
+```{sql connection=con}
+SELECT race, 
+  COUNT(*) AS num_patients,
+  ROUND((COUNT(*) * 100.0 / SUM(COUNT(*)) OVER ()), 2) AS proportion_percent
+FROM stemi_cohort
+GROUP BY race
+ORDER BY num_patients DESC
+;
+```
+```{sql connection=con}
+SELECT ethnicity, 
+  COUNT(*) AS num_patients,
+  ROUND((COUNT(*) * 100.0 / SUM(COUNT(*)) OVER ()), 2) AS proportion_percent
+FROM stemi_cohort
+GROUP BY ethnicity
+ORDER BY num_patients DESC
+;
+```
+
+## B. STEMI Cohort - Risk Factors / Comorbidities
+
+### 1. Smoking Status
+> What proportion of patients in the STEMI cohort reported formerly or currently smoking?
+
+The smoking status of patients was analyzed to consider the potential impact of tobacco use on MI risk. 
+
+The majority of patients report never having smoked, and 33% report formerly smoking.
+
+```{sql connection=con}
+-- Calculate the proportion of patients in the stemi_cohort who have or currently smoked
+WITH smokers AS (
+  SELECT
+      patient,
+      CASE 
+        WHEN code = '72166-2' AND value = 'Smokes tobacco daily (finding)' THEN 'Current smoker'
+        WHEN code = '72166-2' AND value = 'Ex-smoker (finding)' THEN 'Former smoker'
+        WHEN code = '72166-2' AND value = 'Never smoked tobacco (finding)' THEN 'Never smoked'
+      END AS smoking_status,
+      ROW_NUMBER() OVER (PARTITION BY patient ORDER BY date DESC) AS rn
+  FROM observations
+  WHERE code = '72166-2'
+)
+SELECT
+  smoking_status,
+  COUNT(DISTINCT sm.patient) AS patient_count,
+  ROUND((COUNT(DISTINCT sm.patient) * 100.0 / (SELECT COUNT(DISTINCT patient) FROM stemi_cohort)), 2) AS proportion_percent
+FROM smokers sm
+RIGHT JOIN stemi_cohort st ON sm.patient = st.patient
+WHERE sm.rn = 1 -- Only take the most recent record per patient
+GROUP BY smoking_status
+;
+```
+
+### 2. Hypertension
+> What proportion of patients in the STEMI cohort have a reported condition of hypertension? 
+
+Hypertension is a significant risk factor for STEMI due to its role in the pathophysiology of coronary artery disease (CAD), which is the underlying cause of STEMI.
+
+The majority of the STEMI cohort report a condition of hypertension (77%).
+
+```{sql connection=con}
+-- Calculate the proportion of patients in the stemi_cohort who have a condition of hypertension (htn)
+WITH htn_patients AS (
+  SELECT patient
+  FROM conditions
+  WHERE code = '59621000' -- Essential hypertension (disorder)
+)
+
+SELECT 
+  COUNT(DISTINCT s.patient) AS htn_patient_count,
+  (SELECT COUNT(DISTINCT patient) FROM stemi_cohort) AS total_patient_count,
+  ROUND((COUNT(DISTINCT s.patient) * 100.0 / (SELECT COUNT(DISTINCT patient) FROM stemi_cohort)), 2) AS htn_percent
+FROM stemi_cohort s
+JOIN htn_patients h ON s.patient = h.patient;
+```
+
+# IV. Quality Measurements
+
+## A. Door-to-Balloon (DTB) Time
+> What is the distribution of DTB times for STEMI patients?
+
+A simplified STEMI clinical workflow includes the following steps:
+```{mermaid}
+flowchart LR
+  A(ED Admission) --> B(EKG) 
+  B --> C(Cardiology Consultation) 
+  C --> D(PCI)
+```
+
+The time between a patient’s arrival in the Emergency Department (ED) and the beginning of percutaneous coronary intervention (PCI) is referred to as **door-to-balloon time (DTB time)**. Clinical guidelines emphasize that DTB time should be under 90 minutes to minimize the risk of death and long-term complications. 
+
+Here, we assume that the encounter begins at the start of the EKG procedure, and, therefore, calculate the **DTB time as the difference between the start of the EKG procedure and the start of the PCI procedure**. 
+
+Using the cohort of STEMI patients we previously established, we assembled a timeline of events for each patient, reflecting the duration of and between each step in the clinical workflow, and the total DTB time. 
+
+While the STEMI cohort includes over 400 patients, the STEMI timeline table only includes patients who have complete records of the three crucial steps in the clinical workflow: EKG, Cardiology Consultation, and PCI. Additionally, some STEMI patients receive surgical intervention instead of PCI, so those patients are also not reflected in the timeline. 
+
+```{sql connection=con}
+-- Drop the temporary table if it already exists
+DROP TABLE IF EXISTS stemi_timeline;
+```
+
+```{sql connection=con}
+CREATE TEMPORARY TABLE stemi_timeline AS
+
+WITH ekg_patients AS (
+  SELECT 
+    patient,
+    encounter AS ekg_encounter,
+    start AS ekg_start,
+    stop AS ekg_stop,
+    code AS ekg_code,
+    description AS ekg_desc,
+    EXTRACT(YEAR FROM start) AS ekg_year,  -- Extract the year from the EKG start time
+    ROW_NUMBER() OVER (PARTITION BY patient ORDER BY start DESC) AS ekg_rank  -- Pick the most recent EKG
+  FROM procedures
+  -- EKG-related procedure codes:
+  WHERE code = '29303009'  -- Electrocardiographic procedure (procedure)
+     OR code = '268400002'  -- 12 lead electrocardiogram (procedure)
+)
+
+, cardio_consult_patients AS (
+  SELECT
+    patient,
+    encounter AS consult_encounter,
+    start AS consult_start,
+    stop AS consult_stop,
+    code AS consult_code,
+    description AS consult_desc,
+    EXTRACT(YEAR FROM start) AS consult_year,  -- Extract the year from the Consult start time
+    ROW_NUMBER() OVER (PARTITION BY patient ORDER BY start DESC) AS consult_rank  -- Pick the most recent consult
+  FROM procedures
+  WHERE code = '698314001' -- Consultation for treatment (procedure)
+)
+
+, pci_patients AS (
+  SELECT 
+    patient,
+    encounter AS pci_encounter,
+    start AS pci_start,
+    stop AS pci_stop,
+    EXTRACT(YEAR FROM start) AS pci_year,  -- Extract the year from the PCI start time
+    ROW_NUMBER() OVER (PARTITION BY patient ORDER BY start DESC) AS pci_rank  -- Pick the most recent PCI
+  FROM procedures
+  WHERE code = '415070008'  -- Percutaneous coronary intervention (procedure)
+)
+
+SELECT 
+  s.patient, 
+  -- Encounter IDs
+  e.ekg_encounter, 
+  c.consult_encounter,
+  p.pci_encounter,
+  -- Datetimes
+  e.ekg_start,
+  e.ekg_stop,
+  c.consult_start,
+  c.consult_stop,
+  p.pci_start,
+  p.pci_stop,
+  -- Calculate durations:
+  -- EKG
+  ROUND(EXTRACT(EPOCH FROM (e.ekg_stop - e.ekg_start)) / 60, 2) AS ekg_duration_minutes,  
+  ROUND(EXTRACT(EPOCH FROM (c.consult_start - e.ekg_stop)) / 60, 2) AS ekg_to_consult_minutes,
+  -- Consult
+  ROUND(EXTRACT(EPOCH FROM (c.consult_stop - c.consult_start)) / 60, 2) AS consult_duration_minutes,
+  ROUND(EXTRACT(EPOCH FROM (p.pci_start - c.consult_stop)) / 60, 2) AS consult_to_pci_minutes,
+  -- PCI
+  ROUND(EXTRACT(EPOCH FROM (p.pci_stop - p.pci_start)) / 60, 2) AS pci_duration_minutes,
+  -- DTB
+  ROUND(EXTRACT(EPOCH FROM (p.pci_start - e.ekg_start)) / 60, 2) AS dtb_minutes 
+FROM stemi_cohort s
+JOIN ekg_patients e ON s.patient = e.patient
+JOIN cardio_consult_patients c ON s.patient = c.patient
+JOIN pci_patients p ON s.patient = p.patient
+-- FILTERS
+-- Add column to reflect if the encounters for ekg, consult and pci are the same or different
+WHERE p.pci_rank = 1  -- Only the most recent PCI procedure
+  AND e.ekg_rank = 1  -- Only the most recent EKG procedure
+  AND c.consult_rank = 1  -- Only the most recent consult
+  -- Filter out negative durations:
+  AND EXTRACT(EPOCH FROM (e.ekg_stop - e.ekg_start)) >= 0  -- Filter out rows with negative EKG durations
+  AND EXTRACT(EPOCH FROM (c.consult_stop - c.consult_start)) >= 0  -- Filter out rows with negative consult durations
+  AND EXTRACT(EPOCH FROM (p.pci_stop - p.pci_start)) >= 0  -- Filter out rows with negative PCI durations
+  AND EXTRACT(EPOCH FROM (p.pci_start - e.ekg_start)) >= 0  -- Filter out rows with negative DTB times
+  -- Ensure all encounters are from the same year (same visit):
+  AND e.ekg_year = c.consult_year
+  AND c.consult_year = p.pci_year
+  -- Ensure encounters occur within a reasonable time window (within 24 hours):
+  AND EXTRACT(EPOCH FROM (p.pci_start - e.ekg_start)) <= 86400  -- 24 hours (86400 seconds)
+ORDER BY p.patient;
+```
+
+```{sql connection=con}
+-- sanity check: these values should match
+SELECT COUNT(DISTINCT patient) AS distinct_count,
+COUNT(patient) AS all_patients
+FROM stemi_timeline
+```
+```{sql connection=con}
+-- STEMI patients in the stemi_timeline table should have been admitted to the ED
+SELECT 
+  COUNT (DISTINCT s.patient) AS patient_count,
+  e.encounterclass, 
+  e.description
+FROM stemi_timeline s
+JOIN encounters e ON s.patient = e.patient AND s.ekg_encounter = e.id
+WHERE encounterclass = 'emergency'
+GROUP BY e.encounterclass, e.description
+```
+
+Export stemi_timeline_pre_intervention.csv for Tableau analysis:
+```{r}
+query1 <- "SELECT * FROM stemi_timeline"
+stemi_timeline_pre_intervention <- dbGetQuery(con, query1)
+
+# Get the current timestamp
+timestamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
+
+# Create a filename with the timestamp
+filename <- paste0("stemi_timeline_pre_intervention_", timestamp, ".csv")
+
+# Write the data to a CSV file
+write.csv(stemi_timeline_pre_intervention, filename, row.names = FALSE)
+```
+
+#### DTB time distribution in the STEMI cohort
+95% of STEMI patients were transferred to the cath lab for PCI within 30 minutes of arrival. Approximately 4% of patients experienced delayed treatment with DTB times over 90 minutes, exceeding clinical guidelines.
+```{sql connection=con}
+SELECT 
+  CASE 
+    WHEN dtb_minutes < 30 THEN '<30 minutes'
+    WHEN dtb_minutes BETWEEN 31 and 60 THEN '31-60 minutes'
+    WHEN dtb_minutes BETWEEN 61 and 90 THEN '61-90 minutes'
+    WHEN dtb_minutes > 90 THEN '90 minutes'
+    ELSE 'Unknown'
+  END AS dtb_bin,
+  COUNT(patient) AS patient_count,
+  ROUND((COUNT(patient) * 100.0 / SUM(COUNT(patient)) OVER ()), 2) AS proportion_percent
+FROM stemi_timeline
+GROUP BY dtb_bin
+ORDER BY dtb_bin
+```
+
+```{sql connection=con, output.var="dtb_dist_df"}
+SELECT 
+  CASE 
+    WHEN dtb_minutes < 30 THEN '1. <30 minutes'
+    WHEN dtb_minutes BETWEEN 31 and 60 THEN '2. 31-60 minutes'
+    WHEN dtb_minutes BETWEEN 61 and 90 THEN '3. 61-90 minutes'
+    WHEN dtb_minutes > 90 THEN '4.>90 minutes'
+    ELSE 'Unknown'
+  END AS dtb_bin,
+  COUNT(patient) AS patient_count,
+  ROUND((COUNT(patient) * 100.0 / SUM(COUNT(patient)) OVER ()), 2) AS proportion_percent
+FROM stemi_timeline
+GROUP BY dtb_bin
+ORDER BY dtb_bin
+```
+```{r}
+# plot the distribution of deaths by time
+ggplot(dtb_dist_df, aes(x = dtb_bin, y = patient_count)) +
+  geom_col(fill = "#041E42", color = "black") +
+  labs(title = "Distribution of DTB Times for STEMI Patients",
+       x = "DTB Time",
+       y = "Patient Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+For the eight patients who did not receive PCI within the 90 minute window, one patient had a reported death within 3 months of the encounter. Therefore, it is difficult to conclude if there is a relationship between 3-month mortality and longer DTB times from this data. A larger sample size could provide further insight into a potential correlation. 
+
+```{sql connection=con}
+SELECT 
+  patient,
+  ekg_start,
+  dtb_minutes,
+  deathdate,
+  CASE 
+    WHEN (deathdate - ekg_start) <= INTERVAL '3 months' THEN 1
+    ELSE 0
+  END AS stemi_death
+FROM stemi_timeline
+JOIN patients ON stemi_timeline.patient = patients.id
+WHERE dtb_minutes >= 90;
+```
+
+## B. Medication Compliance
+> Whhat proportion of patients in the stemi_timeline table received medication within 24hrs of their visit?
+
+For STEMI patients, receiving the appropriate medications within 24 hours of their visit is crucial for several reasons:
+
+**Dual Antiplatelet Therapy (DAPT):** This involves using medications like aspirin and another antiplatelet agent (prasugrel, ticagrelor, or clopidogrel). DAPT helps prevent the formation of clots, which are a primary cause of STEMI. These medications inhibit platelet aggregation and reduce the risk of recurrent myocardial infarction and other thrombotic events by stabilizing the coronary artery after it has been opened during the acute phase.
+
+**High-Intensity Statins:** Statins are used to lower LDL cholesterol and reduce the risk of further coronary events by stabilizing atherosclerotic plaques and reducing inflammation. High-intensity statins are particularly beneficial in STEMI patients as they help to minimize the risk of future cardiovascular events.
+
+**Beta-Blockers:** These medications help reduce the heart's workload and oxygen demand, which can improve heart function post-STEMI. They slow the heart rate, reduce blood pressure, and diminish the force of contraction of the heart muscle, thereby lowering the risk of further damage to the heart tissue.
+
+Medications categorized by type:
+
+| Medication Type | Medications |
+|-----------------|---------------|
+| Dual Antiplatelet Therapy (DAPT) | Aspirin, Prasugrel, Ticagrelor, Clopidogrel, Eptifibatide, Tirofiban, Bivalirudin |
+| High-Intensity Statins | Enoxaparin |
+| Beta-Blockers | Heparin, Fondaparinux |
+
+Clinical guidelines strongly recommend the administration of these medications to STEMI patients as a standard part of the acute management protocol. Adherence to these guidelines is associated with improved patient outcomes, reinforcing the importance of medication compliance within the critical first 24 hours.
+
+Here, we see that 99% of STEMI patients received timely medication. 
+
+```{sql connection=con}
+WITH stemi_meds AS (
+SELECT
+  s.patient,
+  -- DAPTs
+  MAX(CASE 
+    WHEN m.code IN (2563431, 243670, 855812, 212033, 1116635, 749196, 1997015, 200349, 1737466, 309362) THEN 1
+    ELSE 0
+  END) AS DAPT,
+  -- Statins  
+  MAX(CASE 
+    WHEN m.code IN (854255) THEN 1
+    ELSE 0
+  END) AS Statin,
+  -- BetaBlockers
+  MAX(CASE 
+    WHEN m.code IN (1659263, 1361048, 1361226, 861356) THEN 1
+    ELSE 0
+  END) AS BetaBlocker,
+  -- Other
+  MAX(CASE 
+    WHEN m.code NOT IN (2563431, 243670, 855812, 212033, 1116635, 749196, 1997015, 200349, 1737466, 309362, 854255, 1659263, 1361048, 1361226, 861356) THEN 1
+    ELSE 0
+  END) AS Other
+FROM medications AS m
+JOIN stemi_timeline AS s ON m.patient = s.patient AND m.encounter = s.ekg_encounter
+WHERE
+  -- Filter for medications administered within 24hrs of STEMI encounter
+  (EXTRACT(EPOCH FROM (m.start - s.ekg_start)) / 60) <= 1440 -- 24 hours = 1440 minutes
+  AND s.patient IN (SELECT patient FROM stemi_timeline)
+GROUP BY s.patient
+ORDER BY s.patient
+)
+
+SELECT
+  -- SUM(DAPT) AS DAPT,
+  ROUND((SUM(DAPT) / SUM(COUNT(patient)) OVER ()), 2) AS dapt_percent,
+  -- SUM(Statin) AS Statin,
+  ROUND((SUM(Statin) / SUM(COUNT(patient)) OVER ()), 2) AS statin_percent,
+  -- SUM(BetaBlocker) AS BetaBlocker,
+  ROUND((SUM(BetaBlocker) / SUM(COUNT(patient)) OVER ()), 2) AS betablocker_percent,
+  -- SUM(Other) AS Other,
+  ROUND((SUM(Other) / SUM(COUNT(patient)) OVER ()), 2) AS other_percent
+FROM stemi_meds;
+```
+
+## C. 3-Month Mortality Rate
+> What proportion of patients in the stemi_timeline table had a STEMI-related death? 
+
+The 3-month mortality rate is a critical early indicator of the effectiveness of acute STEMI management and treatment strategies. It helps in assessing the immediate outcomes of the care provided to patients following a STEMI. A high mortality rate within the first three months could signal issues with the initial intervention or post-discharge management, necessitating review and potential changes to clinical protocols.
+
+Here, we define STEMI-related deaths as patient deaths that occur within 3 months of a STEMI encounter. Approximately 13% of the patients in the STEMI timeline table had reported death dates, and of those, 7% of deaths occurred within 3 months. 
+
+```{sql connection=con}
+DROP TABLE IF EXISTS stemi_deaths;
+```
+
+```{sql connection=con}
+CREATE TEMPORARY TABLE stemi_deaths AS
+  SELECT 
+  s.patient,
+  s.ekg_encounter,
+  s.ekg_start,
+  p.deathdate,
+  CASE 
+  WHEN p.deathdate IS NOT NULL 
+    AND p.deathdate <= s.ekg_start + INTERVAL '3 months' 
+  THEN 1 
+  ELSE 0 
+END AS stemi_death
+FROM stemi_timeline s
+JOIN patients p ON s.patient = p.id;
+```
+
+```{sql connection=con}
+-- Calculate the number of deaths for patients in the STEMI timeline table
+SELECT 
+  COUNT(DISTINCT patient) AS total_stemi_patients,
+  COUNT(p.deathdate) AS total_deaths,
+  ROUND(COUNT(p.deathdate) * 100.0 / COUNT(DISTINCT s.patient), 2) AS percent_total_deaths,
+  SUM(CASE 
+        WHEN p.deathdate IS NOT NULL 
+          AND p.deathdate <= s.ekg_start + INTERVAL '3 months' 
+        THEN 1 
+        ELSE 0 
+      END) AS deaths_within_3_months,
+  ROUND(SUM(CASE 
+        WHEN p.deathdate IS NOT NULL 
+          AND p.deathdate <= s.ekg_start + INTERVAL '3 months' 
+        THEN 1 
+        ELSE 0 
+      END) * 100.0 / COUNT(DISTINCT patient), 2) AS percent_deaths_within_3_months
+FROM stemi_timeline s
+JOIN patients p ON s.patient = p.id;
+```
+
+```{sql connection=con, output.var = "death_dist_df",}
+-- Plot the distribution of STEMI deaths by time 
+SELECT 
+  CASE 
+    WHEN deathdate - ekg_start <= INTERVAL '3 months' THEN '1. < 3 months'
+    WHEN deathdate - ekg_start > INTERVAL '3 months' AND deathdate - ekg_start <= INTERVAL '6 months' THEN '2. 3-6 months'
+    WHEN deathdate - ekg_start > INTERVAL '6 months' AND deathdate - ekg_start <= INTERVAL '1 year' THEN '3. 6 months-1 year'
+    WHEN deathdate - ekg_start > INTERVAL '1 year' AND deathdate - ekg_start <= INTERVAL '3 years' THEN '4. 1-3 years'
+    WHEN deathdate - ekg_start > INTERVAL '3 years' AND deathdate - ekg_start <= INTERVAL '5 years' THEN '5. 3-5 years'
+    ELSE '6. > 5 years'
+  END AS time_stemi_to_death,
+  COUNT(*) AS patient_count
+FROM stemi_deaths
+WHERE deathdate IS NOT NULL
+GROUP BY time_stemi_to_death
+-- ORDER BY time_stemi_to_death
+;
+```
+```{r}
+# plot the distribution of deaths by time
+ggplot(death_dist_df, aes(x = time_stemi_to_death, y = patient_count)) +
+  geom_col(fill = "#041E42", color = "black") +
+  labs(title = "Distribution of STEMI Patient Deaths",
+       x = "Time from STEMI Encounter to Death",
+       y = "Patient Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+Export stemi_deaths_pre_intervention.csv for Tableau analysis:
+```{r}
+query2 <- "SELECT * FROM stemi_deaths"
+stemi_deaths_pre_intervention <- dbGetQuery(con, query2)
+
+# Get the current timestamp
+timestamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
+
+# Create a filename with the timestamp
+filename <- paste0("stemi_deaths_pre_intervention_", timestamp, ".csv")
+
+# Write the data to a CSV file
+write.csv(stemi_deaths_pre_intervention, filename, row.names = FALSE)
+```
+
+## D. Troponin Laboratory Tests
+> What proportion of patients in the stemi_timeline table received a troponin laboratory test during their STEMI encounter?
+
+Troponin is a protein released into the bloodstream when heart muscle cells are damaged, making it a sensitive and specific marker for myocardial infarction. Elevated troponin levels within 3 to 6 hours of symptom onset are a key diagnostic criterion for STEMI. Measuring troponin helps distinguish between non-ST-elevation myocardial infarction (NSTEMI) and STEMI, guiding appropriate treatment plans.
+
+100% of STEMI patients received a troponin test during their STEMI encounter.
+
+```{sql connection=con}
+WITH trop_labs AS (
+  SELECT patient, encounter, code, description
+  FROM observations
+  WHERE code = '89579-7' -- Troponin I.cardiac [Mass/volume] in Serum or Plasma by High sensitivity method	
+)
+
+-- SELECT COUNT(DISTINCT s.patient)
+SELECT 
+  COUNT(s.patient) AS troponin_patient_count,
+  ROUND((COUNT(s.patient) * 100.0 / SUM(COUNT(s.patient)) OVER ()), 2) AS troponin_percent
+FROM stemi_timeline s
+JOIN trop_labs t ON s.patient = t.patient AND s.ekg_encounter = t.encounter
+```
+
